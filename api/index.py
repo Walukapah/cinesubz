@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CineSubz API - Vercel Serverless Function
-Endpoint: /api/cinesubz?episode=<episode_url>
+Endpoint: /cinesubz?episode=<episode_url>
 """
 
 import sys
@@ -9,10 +9,11 @@ import re
 import json
 import os
 import urllib.request
-from urllib.parse import urlparse, urlencode, unquote
+from urllib.parse import urlparse, urlencode, unquote, parse_qs
 
-# Add the parent directory to path so we can import
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ============================================
+# ALL HELPER FUNCTIONS (same as your script)
+# ============================================
 
 def fetch_html(url):
     headers = {
@@ -76,7 +77,6 @@ def download_page(url, output_path):
 
 
 def extract_video_from_embed(html_content):
-    """Extract direct video URL from embed/player page HTML."""
     patterns = [
         r'const\s+ALL_QUALITIES\s*=\s*(\[.*?\]);',
         r'var\s+ALL_QUALITIES\s*=\s*(\[.*?\]);',
@@ -142,7 +142,6 @@ def extract_video_from_embed(html_content):
 
 
 def generate_quality_variants(video_url):
-    """Generate 480P, 720P, 1080P variants from a single URL."""
     if not video_url:
         return []
 
@@ -169,7 +168,6 @@ def generate_quality_variants(video_url):
 
 
 def extract_episode_info(html, url):
-    """Extract all episode information from HTML."""
     info = {}
 
     parsed = urlparse(url)
@@ -325,7 +323,6 @@ def extract_episode_info(html, url):
 
 
 def get_streaming_urls(base_url, page_url, players_info):
-    """Get streaming URLs by calling player APIs and parsing embed pages."""
     streaming_urls = []
     temp_files = []
 
@@ -418,7 +415,6 @@ def get_streaming_urls(base_url, page_url, players_info):
 
 
 def normalize_quality(q_str):
-    """Normalize quality string to 480P, 720P, or 1080P."""
     q_str = q_str.upper()
     if '480' in q_str or 'SD' in q_str:
         return '480P'
@@ -430,7 +426,6 @@ def normalize_quality(q_str):
 
 
 def build_combined_downloads(streaming_urls, downloads):
-    """Build combined downloads array."""
     if not streaming_urls:
         return None
 
@@ -463,73 +458,86 @@ def build_combined_downloads(streaming_urls, downloads):
     return combined
 
 
-def handler(request):
-    """Vercel serverless function handler."""
-    # Get query parameters
-    query_string = request.get('query', {})
+# ============================================
+# VERCEL HANDLER (REQUIRED - must be named "app")
+# ============================================
+
+class VercelRequest:
+    """Simple request wrapper for Vercel"""
+    def __init__(self, environ):
+        self.environ = environ
+        self.method = environ.get('REQUEST_METHOD', 'GET')
+        
+        # Parse query string
+        query_string = environ.get('QUERY_STRING', '')
+        self.args = parse_qs(query_string)
+        
+        # Flatten single values
+        for key in self.args:
+            if len(self.args[key]) == 1:
+                self.args[key] = self.args[key][0]
+
+    def get(self, key, default=None):
+        return self.args.get(key, default)
+
+
+def app(environ, start_response):
+    """
+    Vercel WSGI entry point - MUST be named 'app'
+    """
+    req = VercelRequest(environ)
     
-    # Handle different request formats
-    if hasattr(query_string, 'get'):
-        episode_url = query_string.get('episode', '')
-    else:
-        episode_url = ''
-
-    # Also check URL-encoded episode parameter
-    if not episode_url:
-        # Try to get from raw query string
-        import urllib.parse
-        path = request.get('url', '')
-        if '?' in path:
-            query = path.split('?')[1]
-            params = urllib.parse.parse_qs(query)
-            episode_url = params.get('episode', [''])[0]
-
-    if not episode_url:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type'
-            },
-            'body': json.dumps({
-                'success': False,
-                'error': 'Missing episode parameter',
-                'usage': '/api/cinesubz?episode=https://cinesubz.lk/episodes/from-2x1/'
-            }, indent=2, ensure_ascii=False)
-        }
-
+    # Get episode URL from query parameter
+    episode_url = req.get('episode', '')
+    
     # URL decode if needed
-    episode_url = unquote(episode_url)
+    if episode_url:
+        episode_url = unquote(episode_url)
+
+    # Validate
+    if not episode_url:
+        status = '400 Bad Request'
+        headers = [
+            ('Content-Type', 'application/json'),
+            ('Access-Control-Allow-Origin', '*'),
+            ('Access-Control-Allow-Methods', 'GET, POST, OPTIONS'),
+            ('Access-Control-Allow-Headers', 'Content-Type')
+        ]
+        body = json.dumps({
+            'success': False,
+            'error': 'Missing episode parameter',
+            'usage': '/cinesubz?episode=https://cinesubz.lk/episodes/from-2x1/'
+        }, indent=2, ensure_ascii=False)
+        start_response(status, headers)
+        return [body.encode('utf-8')]
 
     if not episode_url.startswith(('http://', 'https://')):
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-            },
-            'body': json.dumps({
-                'success': False,
-                'error': 'Invalid URL. Must start with http:// or https://'
-            }, indent=2, ensure_ascii=False)
-        }
+        status = '400 Bad Request'
+        headers = [
+            ('Content-Type', 'application/json'),
+            ('Access-Control-Allow-Origin', '*'),
+        ]
+        body = json.dumps({
+            'success': False,
+            'error': 'Invalid URL. Must start with http:// or https://'
+        }, indent=2, ensure_ascii=False)
+        start_response(status, headers)
+        return [body.encode('utf-8')]
 
     # Fetch page HTML
     html = fetch_html(episode_url)
     if not html:
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-            },
-            'body': json.dumps({
-                'success': False,
-                'error': 'Failed to fetch page HTML'
-            }, indent=2, ensure_ascii=False)
-        }
+        status = '500 Internal Server Error'
+        headers = [
+            ('Content-Type', 'application/json'),
+            ('Access-Control-Allow-Origin', '*'),
+        ]
+        body = json.dumps({
+            'success': False,
+            'error': 'Failed to fetch page HTML'
+        }, indent=2, ensure_ascii=False)
+        start_response(status, headers)
+        return [body.encode('utf-8')]
 
     # Extract all info from HTML
     info = extract_episode_info(html, episode_url)
@@ -556,13 +564,14 @@ def handler(request):
         'data': info
     }
 
-    return {
-        'statusCode': 200,
-        'headers': {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type'
-        },
-        'body': json.dumps(output, indent=2, ensure_ascii=False)
-    }
+    status = '200 OK'
+    headers = [
+        ('Content-Type', 'application/json'),
+        ('Access-Control-Allow-Origin', '*'),
+        ('Access-Control-Allow-Methods', 'GET, POST, OPTIONS'),
+        ('Access-Control-Allow-Headers', 'Content-Type')
+    ]
+    body = json.dumps(output, indent=2, ensure_ascii=False)
+    
+    start_response(status, headers)
+    return [body.encode('utf-8')]
