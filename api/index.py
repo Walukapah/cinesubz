@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CineSubz API - Vercel Serverless Function
+CineSubz.lk Episode Info Extractor - Vercel API
 Endpoint: /cinesubz?episode=<episode_url>
 """
 
@@ -8,12 +8,10 @@ import sys
 import re
 import json
 import os
+import subprocess
 import urllib.request
 from urllib.parse import urlparse, urlencode, unquote, parse_qs
 
-# ============================================
-# ALL HELPER FUNCTIONS (same as your script)
-# ============================================
 
 def fetch_html(url):
     headers = {
@@ -77,6 +75,8 @@ def download_page(url, output_path):
 
 
 def extract_video_from_embed(html_content):
+    """Extract direct video URL from embed/player page HTML."""
+    # Try ALL_QUALITIES array
     patterns = [
         r'const\s+ALL_QUALITIES\s*=\s*(\[.*?\]);',
         r'var\s+ALL_QUALITIES\s*=\s*(\[.*?\]);',
@@ -108,6 +108,7 @@ def extract_video_from_embed(html_content):
                 if results:
                     return results
 
+    # Fallback: find mp4 URLs
     mp4_pattern = r'(https?://[^\s"\'<>]+\.mp4(?:\?[^\s"\'<>]*)?)'
     mp4_matches = re.findall(mp4_pattern, html_content)
     seen = set()
@@ -115,6 +116,7 @@ def extract_video_from_embed(html_content):
     for url in mp4_matches:
         if url not in seen:
             seen.add(url)
+            # Extract quality from URL
             q_match = re.search(r'-(480P|720P|1080P|1440P|2160P)', url, re.I)
             quality = q_match.group(1).upper() if q_match else 'Unknown'
             results.append({
@@ -126,6 +128,7 @@ def extract_video_from_embed(html_content):
     if results:
         return results
 
+    # Fallback: url: "..." pattern
     url_pattern = r'url:\s*[\'](https?://[^\s"\'<>]+)[\']'
     url_matches = re.findall(url_pattern, html_content)
     seen = set()
@@ -142,6 +145,7 @@ def extract_video_from_embed(html_content):
 
 
 def generate_quality_variants(video_url):
+    """Generate 480P, 720P, 1080P variants from a single URL."""
     if not video_url:
         return []
 
@@ -168,25 +172,33 @@ def generate_quality_variants(video_url):
 
 
 def extract_episode_info(html, url):
+    """Extract all episode information from HTML."""
     info = {}
 
+    # Base URL
     parsed = urlparse(url)
     base_url = parsed.scheme + "://" + parsed.netloc + "/"
     info['source_url'] = url
     info['base_url'] = base_url.rstrip('/')
 
+    # Title from <title>
     title_match = re.search(r'<title>([^<]+?)\s*-\s*CineSubz', html, re.I)
     info['title'] = title_match.group(1).strip() if title_match else None
 
+    # Episode Title
     ep_title_match = re.search(r'<strong>Episode Title:</strong><a>([^<]+)</a>', html)
     info['episode_title'] = ep_title_match.group(1).strip() if ep_title_match else None
 
+    # Series Name
     series_match = re.search(r'<strong>Serie:</strong><a[^>]*>([^<]+)</a>', html)
     info['series'] = series_match.group(1).strip() if series_match else None
 
+    # Year
     year_match = re.search(r'<strong>Year:</strong><a[^>]*>(\d{4})</a>', html)
     info['year'] = year_match.group(1) if year_match else None
 
+    # Season & Episode from title or URL
+    # From: 2×1 or from-2x1
     se_match = re.search(r'[Ss]?(\d+)[x×\-]?[Ee]?(\d+)', info.get('title', '') + ' ' + url)
     if se_match:
         info['season'] = int(se_match.group(1))
@@ -195,12 +207,15 @@ def extract_episode_info(html, url):
         info['season'] = None
         info['episode'] = None
 
+    # Post ID
     post_id_match = re.search(r'data-post=["\'](\d+)["\']', html)
     info['post_id'] = post_id_match.group(1) if post_id_match else None
 
+    # Data Type
     type_match = re.search(r'data-type=["\']([^"\']+)["\']', html)
     info['data_type'] = type_match.group(1) if type_match else 'ep'
 
+    # Description
     desc_match = re.search(r'<div class="details-desc">\s*<p>(.*?)</p>\s*</div>', html, re.DOTALL)
     if desc_match:
         desc = re.sub(r'<[^>]+>', '', desc_match.group(1))
@@ -209,25 +224,30 @@ def extract_episode_info(html, url):
     else:
         info['description'] = None
 
+    # Rating
     rating_match = re.search(r'ratingValue["\'][^>]*content=["\']([\d.]+)["\']', html)
     if not rating_match:
         rating_match = re.search(r'zt_rating_vgs["\'][^>]*>([\d.]+)<', html)
     info['rating'] = rating_match.group(1) if rating_match else None
 
+    # Rating count
     count_match = re.search(r'ratingCount["\'][^>]*content=["\'](\d+)["\']', html)
     if not count_match:
         count_match = re.search(r'(\d+)\s*vote', html)
     info['rating_count'] = count_match.group(1) if count_match else None
 
+    # Poster / Backdrop
     poster_match = re.search(r'<meta property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', html)
     info['poster'] = poster_match.group(1) if poster_match else None
 
+    # Backdrop from splash
     backdrop_match = re.search(r'<div class=[\']splash-bg[\']>.*?<img src=[\']([^\'"]+)[\']', html, re.DOTALL)
     if backdrop_match and 'zt_backdrop' not in backdrop_match.group(1):
         info['backdrop'] = backdrop_match.group(1)
     else:
         info['backdrop'] = info.get('poster')
 
+    # Gallery images
     gallery = []
     gallery_matches = re.findall(r'<div class=[\']gall-item[\']>.*?<a href=[\']([^\'"]+)[\'].*?<img src=[\']([^\'"]+)[\']\s*alt=[\']([^\'"]*)[\']', html, re.DOTALL)
     for full, thumb, alt in gallery_matches:
@@ -238,6 +258,7 @@ def extract_episode_info(html, url):
         })
     info['gallery'] = gallery if gallery else None
 
+    # Keywords/Tags
     keywords = []
     kw_matches = re.findall(r'<a href="https://cinesubz\.lk/keywords/[^"]+"[^>]*>([^<]+)</a>', html)
     for kw in kw_matches:
@@ -246,6 +267,7 @@ def extract_episode_info(html, url):
             keywords.append(k)
     info['keywords'] = keywords if keywords else None
 
+    # Player Options
     players = []
     player_matches = re.findall(r'<li[^>]*data-post=["\'](\d+)["\'][^>]*data-nume=["\'](\d+)["\'][^>]*>.*?<span class=["\']opt-name["\']>([^<]+)</span>', html, re.DOTALL)
     for post, nume, name in player_matches:
@@ -257,6 +279,7 @@ def extract_episode_info(html, url):
         })
     info['players'] = players if players else None
 
+    # Download Links
     downloads = []
     dl_matches = re.findall(
         r'<div class=["\']download-link-item["\'][^>]*>.*?'
@@ -280,6 +303,7 @@ def extract_episode_info(html, url):
         })
     info['downloads'] = downloads if downloads else None
 
+    # Episode Navigation
     nav = {}
     prev_match = re.search(r'<a href=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*nav-prev[^"\']*["\']', html)
     if prev_match and 'disabled' not in prev_match.group(0):
@@ -301,6 +325,7 @@ def extract_episode_info(html, url):
 
     info['navigation'] = nav
 
+    # Episode List (Season episodes)
     episode_list = []
     ep_matches = re.findall(
         r'<li class=["\']ep-(\d+)[^"\']*["\']>.*?'
@@ -315,7 +340,7 @@ def extract_episode_info(html, url):
             'url': ep_url.strip(),
             'title': ep_title.strip(),
             'date': ep_date.strip(),
-            'active': 'active' in ep_url or False
+            'active': 'active' in ep_url or False  # simplified
         })
     info['episode_list'] = episode_list if episode_list else None
 
@@ -323,6 +348,7 @@ def extract_episode_info(html, url):
 
 
 def get_streaming_urls(base_url, page_url, players_info):
+    """Get streaming URLs by calling player APIs and parsing embed pages."""
     streaming_urls = []
     temp_files = []
 
@@ -351,6 +377,7 @@ def get_streaming_urls(base_url, page_url, players_info):
             continue
 
         if video_type in ('mp4', 'ztshcode') and str(embed_url).startswith('http'):
+            # Download embed page to extract video URL
             temp_file = f"/tmp/embed_{post_id}_{nume}.html"
             temp_files.append(temp_file)
 
@@ -387,6 +414,7 @@ def get_streaming_urls(base_url, page_url, players_info):
                     'player': name
                 })
 
+    # Clean up temp files
     for tf in temp_files:
         try:
             if os.path.exists(tf):
@@ -394,6 +422,7 @@ def get_streaming_urls(base_url, page_url, players_info):
         except:
             pass
 
+    # Deduplicate and generate quality variants
     seen = set()
     unique_urls = []
     for v in streaming_urls:
@@ -401,6 +430,7 @@ def get_streaming_urls(base_url, page_url, players_info):
             seen.add(v['url'])
             unique_urls.append(v)
 
+    # Generate multi-quality variants for each unique URL
     final_streams = []
     seen_final = set()
     for v in unique_urls:
@@ -415,6 +445,7 @@ def get_streaming_urls(base_url, page_url, players_info):
 
 
 def normalize_quality(q_str):
+    """Normalize quality string to 480P, 720P, or 1080P."""
     q_str = q_str.upper()
     if '480' in q_str or 'SD' in q_str:
         return '480P'
@@ -426,9 +457,17 @@ def normalize_quality(q_str):
 
 
 def build_combined_downloads(streaming_urls, downloads):
+    """
+    Build combined downloads array:
+    - URLs from streaming_urls (480P, 720P, 1080P variants)
+    - size and language from downloads matching by quality
+    - default flag from streaming_urls
+    - player from streaming_urls
+    """
     if not streaming_urls:
         return None
 
+    # Map download info by normalized quality
     dl_info_map = {}
     if downloads:
         for dl in downloads:
@@ -441,6 +480,8 @@ def build_combined_downloads(streaming_urls, downloads):
     combined = []
     for stream in streaming_urls:
         norm_q = normalize_quality(stream.get('quality', ''))
+
+        # Get size and language from downloads matching quality
         dl_info = dl_info_map.get(norm_q, {})
 
         combined.append({
@@ -452,14 +493,57 @@ def build_combined_downloads(streaming_urls, downloads):
             'player': stream.get('player', 'Unknown')
         })
 
+    # Sort by quality: 480P, 720P, 1080P
     quality_order = {'480P': 1, '720P': 2, '1080P': 3}
     combined.sort(key=lambda x: quality_order.get(x['quality'].upper(), 99))
 
     return combined
 
 
+def run_extractor(url):
+    """Run the extractor logic - same as main() but returns data instead of printing"""
+    if not url.startswith(('http://', 'https://')):
+        return {
+            "success": False,
+            "error": "Invalid URL. Must start with http:// or https://"
+        }
+
+    # Fetch page HTML
+    html = fetch_html(url)
+    if not html:
+        return {
+            "success": False,
+            "error": "Failed to fetch page HTML"
+        }
+
+    # Extract all info from HTML
+    info = extract_episode_info(html, url)
+
+    # Get streaming URLs from player APIs
+    parsed = urlparse(url)
+    base_url = parsed.scheme + "://" + parsed.netloc + "/"
+
+    players = info.get('players', [])
+    if players:
+        streaming = get_streaming_urls(base_url, url, players)
+        info['streaming_urls'] = streaming if streaming else None
+    else:
+        info['streaming_urls'] = None
+
+    # Build combined downloads from streaming_urls + downloads metadata
+    downloads_raw = info.get('downloads', [])
+    if info.get('streaming_urls'):
+        info['downloads'] = build_combined_downloads(info['streaming_urls'], downloads_raw)
+
+    # Build final output
+    return {
+        "success": True,
+        "data": info
+    }
+
+
 # ============================================
-# VERCEL HANDLER (REQUIRED - must be named "app")
+# VERCEL HANDLER - WSGI app function
 # ============================================
 
 class VercelRequest:
@@ -478,7 +562,10 @@ class VercelRequest:
                 self.args[key] = self.args[key][0]
 
     def get(self, key, default=None):
-        return self.args.get(key, default)
+        val = self.args.get(key, default)
+        if isinstance(val, list) and len(val) == 1:
+            return val[0]
+        return val
 
 
 def app(environ, start_response):
@@ -511,67 +598,22 @@ def app(environ, start_response):
         start_response(status, headers)
         return [body.encode('utf-8')]
 
-    if not episode_url.startswith(('http://', 'https://')):
-        status = '400 Bad Request'
-        headers = [
-            ('Content-Type', 'application/json'),
-            ('Access-Control-Allow-Origin', '*'),
-        ]
-        body = json.dumps({
-            'success': False,
-            'error': 'Invalid URL. Must start with http:// or https://'
-        }, indent=2, ensure_ascii=False)
-        start_response(status, headers)
-        return [body.encode('utf-8')]
+    # Run the extractor (same logic as your python script)
+    result = run_extractor(episode_url)
 
-    # Fetch page HTML
-    html = fetch_html(episode_url)
-    if not html:
-        status = '500 Internal Server Error'
-        headers = [
-            ('Content-Type', 'application/json'),
-            ('Access-Control-Allow-Origin', '*'),
-        ]
-        body = json.dumps({
-            'success': False,
-            'error': 'Failed to fetch page HTML'
-        }, indent=2, ensure_ascii=False)
-        start_response(status, headers)
-        return [body.encode('utf-8')]
-
-    # Extract all info from HTML
-    info = extract_episode_info(html, episode_url)
-
-    # Get streaming URLs from player APIs
-    parsed = urlparse(episode_url)
-    base_url = parsed.scheme + "://" + parsed.netloc + "/"
-
-    players = info.get('players', [])
-    if players:
-        streaming = get_streaming_urls(base_url, episode_url, players)
-        info['streaming_urls'] = streaming if streaming else None
+    # Set status based on result
+    if result.get('success'):
+        status = '200 OK'
     else:
-        info['streaming_urls'] = None
+        status = '400 Bad Request' if 'Invalid URL' in result.get('error', '') else '500 Internal Server Error'
 
-    # Build combined downloads
-    downloads_raw = info.get('downloads', [])
-    if info.get('streaming_urls'):
-        info['downloads'] = build_combined_downloads(info['streaming_urls'], downloads_raw)
-
-    # Build final output
-    output = {
-        'success': True,
-        'data': info
-    }
-
-    status = '200 OK'
     headers = [
         ('Content-Type', 'application/json'),
         ('Access-Control-Allow-Origin', '*'),
         ('Access-Control-Allow-Methods', 'GET, POST, OPTIONS'),
         ('Access-Control-Allow-Headers', 'Content-Type')
     ]
-    body = json.dumps(output, indent=2, ensure_ascii=False)
+    body = json.dumps(result, indent=2, ensure_ascii=False)
     
     start_response(status, headers)
     return [body.encode('utf-8')]
